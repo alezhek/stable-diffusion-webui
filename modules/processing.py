@@ -1007,7 +1007,6 @@ def old_hires_fix_first_pass_dimensions(width, height):
 
     return width, height
 
-
 @dataclass(repr=False)
 class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
     enable_hr: bool = False

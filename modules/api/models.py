@@ -112,6 +112,10 @@ StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
     ]
 ).generate_model()
 
+class TrainLoraRequest(BaseModel):
+    gender: str = Field(title="gender", description="Gender")
+    s3_folder: str = Field(title="s3_folder", description="S3 Folder")
+
 StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
     "StableDiffusionProcessingImg2Img",
     StableDiffusionProcessingImg2Img,

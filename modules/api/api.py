@@ -33,7 +33,10 @@ from typing import Dict, List, Any
 import piexif
 import piexif.helper
 from contextlib import closing
+import boto3
+from dotenv import load_dotenv
 
+load_dotenv()
 
 def script_name_to_index(name, scripts):
     try:
@@ -75,6 +78,37 @@ def verify_url(url):
 
     return True
 
+def download_s3_folder(s3_folder, local_dir=None):
+    s3 = boto3.resource(
+      "s3",
+      aws_access_key_id=os.getenv('AWS_ACCESS_KEY'),
+      aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+    )
+    bucket = s3.Bucket(os.getenv('AWS_BUCKET_NAME'))
+
+    for obj in bucket.objects.filter(Prefix=s3_folder):
+        target = obj.key if local_dir is None \
+            else os.path.join(local_dir, os.path.relpath(obj.key, s3_folder))
+        if not os.path.exists(os.path.dirname(target)):
+            os.makedirs(os.path.dirname(target))
+        if obj.key[-1] == '/':
+            continue
+
+        bucket.download_file(obj.key, target)
+
+def count_files_in_s3_folder(s3_folder):
+    s3 = boto3.resource(
+      "s3",
+      aws_access_key_id=os.getenv('AWS_ACCESS_KEY'),
+      aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+    )
+    bucket = s3.Bucket(name=os.getenv('AWS_BUCKET_NAME'))
+
+    total_count = 0
+    for obj in bucket.objects.filter(Prefix=s3_folder):
+        total_count += 1
+
+    return total_count
 
 def decode_base64_to_image(encoding):
     if encoding.startswith("http://") or encoding.startswith("https://"):
@@ -243,6 +277,7 @@ class Api:
         self.add_api_route("/sdapi/v1/reload-checkpoint", self.reloadapi, methods=["POST"])
         self.add_api_route("/sdapi/v1/scripts", self.get_scripts_list, methods=["GET"], response_model=models.ScriptsList)
         self.add_api_route("/sdapi/v1/script-info", self.get_script_info, methods=["GET"], response_model=List[models.ScriptInfo])
+        self.add_api_route("/sdapi/v1/train-lora", self.train_lora, methods=["POST"])
 
         if shared.cmd_opts.api_server_stop:
             self.add_api_route("/sdapi/v1/server-kill", self.kill_webui, methods=["POST"])
@@ -335,6 +370,35 @@ class Api:
                     for idx in range(0, min((alwayson_script.args_to - alwayson_script.args_from), len(request.alwayson_scripts[alwayson_script_name]["args"]))):
                         script_args[alwayson_script.args_from + idx] = request.alwayson_scripts[alwayson_script_name]["args"][idx]
         return script_args
+
+    def train_lora(self, req: models.TrainLoraRequest):
+        base_prompt_name = 'ivan_maria'
+        folder_files_size = count_files_in_s3_folder(req.s3_folder)
+        steps = 5 * round(folder_files_size/5)
+
+        img_dir = f'./models/Lora/{req.s3_folder}/img/{steps}_{base_prompt_name} {req.gender}/'
+        reg_dir = f'./models/Lora/reg/1_{req.gender}'
+        log_dir = f'./models/Lora/{req.s3_folder}/log'
+        model_dir = f'./models/Lora/{req.s3_folder}/model'
+
+        print("Started creating dirs and copying files")
+        os.makedirs(f'mkdir ./models/Lora/{req.s3_folder}', exist_ok=True)
+        os.makedirs(f'mkdir ./models/Lora/{req.s3_folder}/log', exist_ok=True)
+        os.makedirs(f'mkdir ./models/Lora/{req.s3_folder}/model', exist_ok=True)
+        os.makedirs(f'mkdir ./models/Lora/{req.s3_folder}/img', exist_ok=True)
+        os.makedirs(f'mkdir ./models/Lora/{req.s3_folder}/img/{steps}_{base_prompt_name} {req.gender}', exist_ok=True)
+
+        print("Started copy images form AWS")
+
+        download_s3_folder(req.s3_folder, img_dir)
+
+        lora_command = "/home/ec2-user/kohya_ss/venv/bin/accelerate launch --num_cpu_threads_per_process=8 '/home/ec2-user/kohya_ss/sdxl_train_network.py' --enable_bucket --min_bucket_reso=256 --max_bucket_reso=2048 --pretrained_model_name_or_path='stabilityai/stable-diffusion-xl-base-1.0' --train_data_dir={img_dir} --reg_data_dir={reg_dir} --resolution='1024,1024' --output_dir={model_dir} --logging_dir={log_dir} --network_alpha='128' --training_comment='keywords:{base_prompt_name}' --save_model_as=safetensors --network_module=networks.lora --text_encoder_lr=5e-05 --unet_lr=0.0001 --network_dim=128 --gradient_accumulation_steps=3 --output_name='headpix_{req.s3_folder}' --lr_scheduler_num_cycles='1' --cache_text_encoder_outputs --no_half_vae --learning_rate='0.0004' --lr_scheduler='cosine' --lr_warmup_steps='13' --train_batch_size='8' --max_train_steps='129' --save_every_n_epochs='1' --mixed_precision='bf16' --save_precision='bf16' --cache_latents --cache_latents_to_disk --optimizer_type='AdamW8bit' --optimizer_args --cache_text_encoder_outputs --network_train_unet_only --bucket_reso_steps='32' --max_data_loader_n_workers='0' --clip_skip=2 --bucket_reso_steps=64 --mem_eff_attn --gradient_checkpointing --xformers --bucket_no_upscale --noise_offset=0.0"
+        
+        print("Started lora training command")
+        
+        os.system(lora_command)
+
+        return 'Working... :)'
 
     def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
         script_runner = scripts.scripts_txt2img
